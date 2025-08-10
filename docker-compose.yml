@@ -1,0 +1,173 @@
+version: '3.8'
+
+services:
+  # etcd cluster for distributed configuration
+  etcd1:
+    image: quay.io/coreos/etcd:v3.5.11
+    container_name: etcd1
+    environment:
+      ETCD_NAME: etcd1
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd1:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd1:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_INITIAL_CLUSTER: etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: etcd-cluster
+    networks:
+      - postgres-ha
+
+  etcd2:
+    image: quay.io/coreos/etcd:v3.5.11
+    container_name: etcd2
+    environment:
+      ETCD_NAME: etcd2
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd2:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd2:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_INITIAL_CLUSTER: etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: etcd-cluster
+    networks:
+      - postgres-ha
+
+  etcd3:
+    image: quay.io/coreos/etcd:v3.5.11
+    container_name: etcd3
+    environment:
+      ETCD_NAME: etcd3
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd3:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd3:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_INITIAL_CLUSTER: etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: etcd-cluster
+    networks:
+      - postgres-ha
+
+  # PostgreSQL with Patroni - Node 1
+  pg1:
+    build:
+      context: .
+      dockerfile: Dockerfile.patroni
+    container_name: pg1
+    environment:
+      PATRONI_NAME: pg1
+      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data/pgdata
+      PATRONI_POSTGRESQL_PGPASS: /tmp/pgpass
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg1:5432
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg1:8008
+      PATRONI_ETCD3_HOSTS: etcd1:2379,etcd2:2379,etcd3:2379
+      PATRONI_SCOPE: postgres-cluster
+    volumes:
+      - pg1_data:/var/lib/postgresql/data
+      - ./patroni1.yml:/etc/patroni.yml
+    command: ["/etc/patroni.yml"]
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
+    networks:
+      - postgres-ha
+
+  # PostgreSQL with Patroni - Node 2
+  pg2:
+    build:
+      context: .
+      dockerfile: Dockerfile.patroni
+    container_name: pg2
+    environment:
+      PATRONI_NAME: pg2
+      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data/pgdata
+      PATRONI_POSTGRESQL_PGPASS: /tmp/pgpass
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg2:5432
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg2:8008
+      PATRONI_ETCD3_HOSTS: etcd1:2379,etcd2:2379,etcd3:2379
+      PATRONI_SCOPE: postgres-cluster
+    volumes:
+      - pg2_data:/var/lib/postgresql/data
+      - ./patroni2.yml:/etc/patroni.yml
+    command: ["/etc/patroni.yml"]
+    depends_on:
+      - etcd1
+      - etcd2
+      - etcd3
+    networks:
+      - postgres-ha
+
+  # HAProxy for failover
+  haproxy:
+    image: haproxy:2.9
+    container_name: haproxy
+    ports:
+      - "5432:5432"
+      - "7000:7000"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - pg1
+      - pg2
+    networks:
+      - postgres-ha
+
+  # PgBouncer connection pooler
+  pgbouncer:
+    image: pgbouncer/pgbouncer:latest
+    container_name: pgbouncer
+    ports:
+      - "6432:6432"  # PgBouncer port
+    environment:
+      DATABASES_HOST: haproxy
+      DATABASES_PORT: 5432
+      DATABASES_USER: postgres
+      DATABASES_PASSWORD: postgres
+      DATABASES_DBNAME: postgres
+      POOL_MODE: transaction
+      LISTEN_PORT: 6432
+      AUTH_TYPE: trust
+      MAX_CLIENT_CONN: 100
+      DEFAULT_POOL_SIZE: 20
+      RESERVE_POOL_SIZE: 5
+      SERVER_RESET_QUERY: DISCARD ALL
+      SERVER_CHECK_DELAY: 10
+      SERVER_LIFETIME: 3600
+      SERVER_IDLE_TIMEOUT: 600
+    depends_on:
+      - haproxy
+    networks:
+      - postgres-ha
+
+  # Python monitoring application
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitor
+    container_name: monitor
+    environment:
+      PGHOST: pgbouncer
+      PGPORT: 6432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+    depends_on:
+      - pgbouncer
+    networks:
+      - postgres-ha
+    restart: unless-stopped
+
+networks:
+  postgres-ha:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.100.0/24
+
+volumes:
+  pg1_data:
+  pg2_data:
