@@ -4,13 +4,16 @@ This setup demonstrates transparent PostgreSQL failover using:
 - **Patroni**: Manages PostgreSQL replication and automatic failover
 - **etcd**: Distributed configuration store for leader election
 - **HAProxy**: Load balancer providing transparent failover to applications
-- **pgBouncer**: Connection pooler for efficient database connections
+- **PgBouncer**: Connection pooler for efficient database connections
 - **Monitor**: Python script showing continuous read/write operations
 
 ## Architecture
 
 ```
 Application
+    |
+    v
+PgBouncer (6432: connection pooling)
     |
     v
 HAProxy (5432: transparent routing)
